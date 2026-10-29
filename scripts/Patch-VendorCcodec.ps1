@@ -17,6 +17,7 @@
 
 .PARAMETER Backup
     Where to copy the unmodified image first (skipped if it already exists).
+    Default: the image path plus ".orig", e.g. C:\WSA\vendor.vhdx.orig
 
 .PARAMETER Revert
     Restore the backup over the image instead of patching.
@@ -27,7 +28,7 @@
 #>
 param(
     [string]$Image = 'C:\WSA\vendor.vhdx',
-    [string]$Backup = 'C:\WSA-original-images-nogapps\vendor.snickler-0.0.2.vhdx',
+    [string]$Backup = "$Image.orig",
     [switch]$Revert
 )
 

@@ -1,183 +1,137 @@
 # WSA on Snapdragon X
 
-Notes and scripts for getting Windows Subsystem for Android running on a **Snapdragon X** (Oryon) laptop, which has no 32-bit ARM support. It covers booting, root, networking behind simplewall, and fixing video playback.
+How to run Windows Subsystem for Android on **Snapdragon X** (Oryon) PCs, which have no 32-bit ARM support. Stock WSA builds don't boot on them.
 
-**Result:** Android 13 boots with **root (Magisk 30.6)**, Play Store sign-in works, YouTube plays (software decoding).
+**Result:** Android 13 with Google Play, **root (Magisk 30.6)**, working internet behind a firewall, and video playback.
 
-| | |
-|---|---|
-| PC | Snapdragon X Plus X1P64100 (10 cores), Adreno X1-85, 16 GB RAM |
-| Windows | 11 Home, build 26200 (25H2), ARM64 |
-| WSA build | [WSABuilds](https://github.com/MustardChef/WSABuilds) LTS 8: `WSA_2407.40000.4.0_arm64_Release-Nightly-NoGApps-NoAmazon.7z`, plus the repaired `Tools\initrd.img` from the `with-magisk-30.6.30600.-stable-NoGApps-NoAmazon` build for root |
-| Android images | [snickler/WSA-Patched](https://github.com/snickler/WSA-Patched) 0.0.2: `wsa-patched-0.0.2.7z` (4 × `.vhdx`) |
-| Install folder | `C:\WSA` (WSA runs from it, so it must stay put) |
-| Firewall | [simplewall](https://github.com/henrypp/simplewall) 3.9.1, allow-list mode |
+Tested on a Snapdragon X Plus X1P64100 (Adreno X1-85, 16 GB), Windows 11 build 26200, with [WSABuilds](https://github.com/MustardChef/WSABuilds) LTS 8 (`2407.40000.4.0` arm64) and [snickler/WSA-Patched](https://github.com/snickler/WSA-Patched) 0.0.2.
+
+## Setup
+
+**Downloads:**
+- From WSABuilds' LTS 8 arm64 release:
+  - `WSA_2407.40000.4.0_arm64_Release-Nightly-NoGApps-NoAmazon.7z`
+  - `WSA_2407.40000.4.0_arm64_Release-Nightly-with-magisk-30.6.30600.-stable-NoGApps-NoAmazon.7z` (only for root; you need just its boot image)
+- From snickler/WSA-Patched 0.0.2: `wsa-patched-0.0.2.7z`. These images include Google Play.
+- [7-Zip](https://www.7-zip.org/) and Google's [platform-tools](https://developer.android.com/tools/releases/platform-tools) (adb).
+
+**Steps** (from a clone of this repo, paths as an example):
+
+```powershell
+$z = "$env:ProgramFiles\7-Zip\7z.exe"
+
+# 1. Unpack WSA to C:\WSA (WSA runs from this folder, so it has to stay there)
+& $z x WSA_2407.40000.4.0_arm64_Release-Nightly-NoGApps-NoAmazon.7z -oC:\
+Rename-Item C:\WSA_2407.40000.4.0_arm64 WSA
+
+# 2. Replace the four Android images with snickler's 64-bit-only ones (keep the originals if you like)
+& $z x wsa-patched-0.0.2.7z -oC:\WSA -aoa
+
+# 3. Fix video playback
+.\scripts\Patch-VendorCcodec.ps1
+
+# 4. Root (optional): repair the Magisk build's boot image and use it
+& $z e WSA_2407.40000.4.0_arm64_Release-Nightly-with-magisk-30.6.30600.-stable-NoGApps-NoAmazon.7z -o"$env:TEMP\magisk-initrd" WSA_2407.40000.4.0_arm64\Tools\initrd.img
+Copy-Item C:\WSA\Tools\initrd.img C:\WSA\Tools\initrd.stock.img
+.\scripts\Repair-MagiskInitrd.ps1 -Source "$env:TEMP\magisk-initrd\initrd.img" -Output C:\WSA\Tools\initrd.img
+```
+
+5. Register WSA from an **admin** terminal: `cd C:\WSA`, then `powershell -ExecutionPolicy Bypass -File .\Install.ps1`. Running it already elevated avoids the permanent `Set-ExecutionPolicy Bypass` (CurrentUser) that `Run.bat` applies.
+6. If you use **simplewall**: close it with File → Exit, run `.\scripts\Add-SimplewallWsaDns.ps1`, and start it again. Otherwise Android has no internet.
+7. In WSA Settings → Advanced settings, turn on **Developer mode**. Unpack platform-tools to `%LOCALAPPDATA%\Android\platform-tools`, run `adb connect 127.0.0.1:58526`, and approve the debugging prompt once.
+8. Optional:
+   - `.\scripts\Register-InstallToWSA.ps1` adds **Install to WSA** to the right-click menu for `.apk`, `.xapk` and `.apks` files.
+   - With root, [stop the location popup](#location-popup) and [register the Magisk app](#root).
+
+To verify: Play Store sign-in works, YouTube plays, and with root `adb shell su -c id` prints `uid=0(root)`.
 
 ## Scripts
 
+All scripts run in Windows PowerShell 5.1 or PowerShell 7 (`powershell -ExecutionPolicy Bypass -File <script>`). The ones that change WSA files refuse to run while WSA is using them.
+
 | Script | What it does |
 |---|---|
-| [`scripts/Repair-MagiskInitrd.ps1`](scripts/Repair-MagiskInitrd.ps1) | Fixes "Magisk build never boots": repairs the corrupted boot hook in WSABuilds' Magisk `initrd.img`. |
-| [`scripts/Trace-WsaBoot.ps1`](scripts/Trace-WsaBoot.ps1) | Records WSA's own diagnostic events (boot progress, why the VM was stopped). Admin only. |
-| [`magisk/service.d/disable-location.sh`](magisk/service.d/disable-location.sh) | Magisk boot script that keeps Android's location off (see the location section). |
-| [`scripts/Patch-VendorCcodec.ps1`](scripts/Patch-VendorCcodec.ps1) | Fixes "no video": turns on Android's software decoders in the patched `vendor.vhdx`. Backs up first and supports `-Revert`. |
-| [`scripts/Add-SimplewallWsaDns.ps1`](scripts/Add-SimplewallWsaDns.ps1) | Fixes "no internet in Android" behind simplewall: adds an inbound DNS rule for the WSA VM. |
-| [`scripts/Install-ToWSA.ps1`](scripts/Install-ToWSA.ps1) | Installs an `.apk` / `.xapk` / `.apks` via adb. Starts WSA if needed and explains common errors. |
-| [`scripts/Register-InstallToWSA.ps1`](scripts/Register-InstallToWSA.ps1) | Adds **Install to WSA** to Explorer's right-click menu (per user, no admin). `-Unregister` removes it. |
-
-The scripts run in Windows PowerShell 5.1 or PowerShell 7, for example `powershell -ExecutionPolicy Bypass -File .\scripts\Patch-VendorCcodec.ps1`.
+| [`Patch-VendorCcodec.ps1`](scripts/Patch-VendorCcodec.ps1) | Turns on Android's software video decoders in snickler's `vendor.vhdx`. Backs up first; `-Revert` undoes it. |
+| [`Repair-MagiskInitrd.ps1`](scripts/Repair-MagiskInitrd.ps1) | Repairs the corrupted boot hook in WSABuilds' Magisk `initrd.img`. |
+| [`Add-SimplewallWsaDns.ps1`](scripts/Add-SimplewallWsaDns.ps1) | Adds a simplewall rule that lets the WSA VM use the host's DNS. |
+| [`Register-InstallToWSA.ps1`](scripts/Register-InstallToWSA.ps1) | Adds **Install to WSA** to Explorer's right-click menu (per user, no admin). `-Unregister` removes it. |
+| [`Install-ToWSA.ps1`](scripts/Install-ToWSA.ps1) | The installer behind that menu entry: starts WSA if needed, installs APKs and bundles (with OBB data), explains common errors. |
+| [`Trace-WsaBoot.ps1`](scripts/Trace-WsaBoot.ps1) | Records WSA's own diagnostic events, for debugging boots that fail before Android logs anything. Admin only. |
+| [`disable-location.sh`](magisk/service.d/disable-location.sh) | Magisk boot script that keeps Android's location off. |
 
 ---
 
-## Problem 1: WSA never starts (crash `0xc0000409`)
+## How it works
 
-**Symptom:** "Starting Windows Subsystem for Android…" shows for about 2 minutes, then the window closes. Event Viewer shows a `WsaClient.exe` crash in `ucrtbase.dll` with exception `0xc0000409`, and WSA Settings → Apps shows "0 apps found".
+### Booting: stock images crash (`0xc0000409`)
 
-**Cause:** WSA's stock Android images include 32-bit ARM components (the 32-bit app launcher and some media/DRM services). Snapdragon X cores have no 32-bit ARM support in hardware, so Android never finishes booting. See [WSABuilds#710](https://github.com/MustardChef/WSABuilds/issues/710).
+On a stock build, "Starting Windows Subsystem for Android…" shows for about 2 minutes, then `WsaClient.exe` crashes with `0xc0000409` and WSA Settings → Apps shows "0 apps found". The stock Android images contain 32-bit ARM components (the 32-bit app runtime and some media/DRM services), and Snapdragon X has no 32-bit ARM support, so Android never finishes booting ([WSABuilds#710](https://github.com/MustardChef/WSABuilds/issues/710)). snickler's images are rebuilt without them. Confirmed with the stock NoGApps images on a fresh data disk: the VM stops within about 20 s.
 
-**Fix:** replace the four images with snickler's rebuilt ones.
+### Root
 
-1. Unpack the WSABuilds `NoGApps-NoAmazon` ARM64 build to `C:\WSA`.
-2. Copy `system.vhdx`, `vendor.vhdx`, `system_ext.vhdx` and `product.vhdx` from `wsa-patched-0.0.2.7z` over the ones in `C:\WSA`. Keep the originals somewhere as a backup.
-3. In an **admin** terminal, run `cd C:\WSA`, then `powershell -ExecutionPolicy Bypass -File .\Install.ps1`.
-   Running it already elevated avoids the permanent `Set-ExecutionPolicy Bypass` (CurrentUser) that `Run.bat` applies.
+The prebuilt Magisk builds fail the same way, even with snickler's images, because of a **corrupted file**, not the CPU.
 
-**What did not work:**
-- **Stock images**, both the GApps + Magisk build and the plain NoGApps build. The NoGApps test used a fresh data disk: the VM stops within about 20 s, and `WsaClient.exe` crashes repeatedly with `0xc0000409`.
-- **Patched images with the Magisk build, as shipped** crash the same way, because the Magisk boot image is corrupted. That one is fixable: see [Root](#root-magisk-build-never-boots).
+On WSA, Magisk sits in `Tools\initrd.img`, a small boot image whose `/init` is a hook called **lspinit** (from [MagiskOnWSALocal](https://github.com/LSPosed/MagiskOnWSALocal)). It starts WSA's normal init (`/wsainit`) and swaps in `magiskinit` when Android starts. In the WSABuilds Magisk build, every `0D 0A` byte pair in lspinit has been turned into `0A`, the CRLF → LF conversion Git applies to text files. lspinit is 3 bytes short and dies with `Illegal instruction` before WSA's init runs, so the VM never contacts Windows. The rest of the boot image is intact.
 
----
+`Repair-MagiskInitrd.ps1` downloads lspinit from a pinned MagiskOnWSALocal commit, checks its SHA-256, confirms the shipped copy is exactly that file with CRLF → LF applied, and writes a fixed `initrd.img`. With it, `su -c id` gives `uid=0(root) … context=u:r:magisk:s0`, and root survives restarts. **To remove root**, copy `initrd.stock.img` back over `C:\WSA\Tools\initrd.img` while WSA is off.
 
-## Problem 2: no internet inside Android ("Couldn't sign in")
+How it was found: a [`Trace-WsaBoot.ps1`](scripts/Trace-WsaBoot.ps1) trace of the failed boot showed `HeartbeatTimeout` with `firstHeartbeatReceived=0`: nothing inside the VM ever talked to Windows. Running the boot image's binaries from a normal boot via `adb shell` then showed `magiskinit` working and `lspinit` crashing, and a byte comparison with the official file showed the damage.
 
-**Symptom:** Google sign-in says "There was a problem communicating with Google servers", and simplewall never prompts.
+**Magisk on WSA:**
+- **The Magisk app is missing from the Start menu** because it comes preinstalled, and WSA only creates entries for apps installed while it runs. Reinstall it over itself once:
+  `adb shell 'cp "$(pm path com.topjohnwu.magisk | cut -d: -f2)" /data/local/tmp/m.apk && pm install -r /data/local/tmp/m.apk'`
+- **Don't use the app's Update / Direct install.** The app can't patch `Tools\initrd.img` on the Windows side. A newer Magisk means rebuilding `initrd.img`.
+- **Zygisk is off by default.** Turn it on in Magisk → Settings → Zygisk and restart WSA if you need it (LSPosed, DenyList, Play Integrity modules). Not tested here yet.
+- The image includes one module, `lsp_cust` ("WSA Customization": VPN dialog, device admin, managed users).
+- `adb root` still doesn't work (the build is `user`); use `adb shell su -c <command>`.
 
-**Cause:** Android's DNS queries go from the VM (for example `172.30.221.210`) to the Windows host on UDP 53, where the Internet Connection Sharing service (`SharedAccess`, in `svchost.exe`) answers them. simplewall blocks this **inbound** traffic, and svchost is set to "silent", so there's no prompt. Normal web traffic from the VM is NAT-forwarded and is *not* blocked; only DNS is.
+### Video: YouTube stuck at 0:00
 
-I found this with simplewall's packet log: Settings → Packets log → "Enable packets logging to a file", then reading `%USERPROFILE%\simplewall.csv`.
+Pages and thumbnails load, but videos never start, and `adb shell dumpsys media.player` lists **no video decoders**:
+- snickler's `vendor.vhdx` `build.prop` sets `debug.stagefright.ccodec=0`, which disables Codec2, where the software decoders (`c2.android.*`) live.
+- Android then falls back to the OMX decoders (`OMX.android.latte.*`), but there's no OMX service: in the stock image it's 32-bit.
+- The image's `c2.goldfish.*` hardware decoders need the Android Emulator's host pipe, which WSA doesn't provide.
 
-**Fix:** a simplewall user rule. Close simplewall fully (File → Exit), run [`Add-SimplewallWsaDns.ps1`](scripts/Add-SimplewallWsaDns.ps1), then start simplewall again. The rule:
+`Patch-VendorCcodec.ps1` changes the value to `4`. It's the same length, so the script byte-patches the `.vhdx` directly (ext4 and VHDX don't checksum file data), including the copy in the filesystem journal. Afterwards `c2.android.avc/vp8/vp9.decoder` are available. **Clear YouTube's storage once** (Settings → Apps → YouTube → Storage), because it remembers that no decoders were found.
 
-- **Allow**, **inbound**, local port **53**
-- remote `172.16.0.0/12` (Hyper-V's private VM range; the exact WSA subnet can change between boots)
-- app `svchost.exe`
+Decoding is software only: 1080p is fine, 4K may stutter, and there's no AV1 or HEVC. Hardware decoding would need a 64-bit build of `android.hardware.media.omx@1.0-service`, which Microsoft never shipped. The 64-bit plugin it loads (`lib64/libstagefrighthw.so`) is in the image, but transplanting the service from another Android 13 build hasn't been tried.
 
-simplewall's command line can't add rules, so the script edits `profile.xml` directly. The attribute names come from simplewall's [`src/db.c`](https://github.com/henrypp/simplewall/blob/master/src/db.c): `dir=1` means inbound, and leaving out `protocol` means any protocol.
+### Internet: "Couldn't sign in" behind simplewall
 
----
+Google sign-in fails with "There was a problem communicating with Google servers", and simplewall never prompts. Android sends DNS queries to the Windows host on UDP 53, where Internet Connection Sharing (`SharedAccess`, in `svchost.exe`) answers them. simplewall blocks this **inbound** traffic silently. Other VM traffic is NAT-forwarded and isn't affected.
 
-## Problem 3: no video playback (YouTube stuck at 0:00)
+`Add-SimplewallWsaDns.ps1` adds a user rule: allow, inbound, local port 53, remote `172.16.0.0/12` (Hyper-V's VM range; the WSA subnet changes between boots), app `svchost.exe`. simplewall's command line can't add rules, so the script edits `profile.xml` directly, with attribute names from simplewall's [`src/db.c`](https://github.com/henrypp/simplewall/blob/master/src/db.c). The diagnosis came from simplewall's packet log (Settings → Packets log → log to file).
 
-**Symptom:** pages and thumbnails load, but the player spins forever at 0:00. YouTube's log reports `fmt.noneavailable` and `canH264Main.0`.
+### Location popup
 
-**Cause:** Android has **no video decoders at all** (`adb shell dumpsys media.player` shows an empty "Decoder infos" list).
-- The patched `vendor.vhdx` `build.prop` sets **`debug.stagefright.ccodec=0`**. That disables Codec2, the media system the built-in software decoders (`c2.android.*`) belong to.
-- With Codec2 off, Android falls back to the OMX decoders listed in `/vendor/etc/media_codecs_google_video.xml` (`OMX.android.latte.*`). The patched image has **no OMX service** to provide them, because in the stock image that service is 32-bit (see below).
-- The patch's own hardware decoders (`c2.goldfish.h264/hevc/vp8/vp9.decoder`) never activate. They need `ro.boot.qemu.hwcodec.*` boot properties plus the Android Emulator's host decoder pipe, and WSA provides neither (logcat: `both vsock and goldfish_pipe paths failed`).
+With Windows location off, a notification keeps saying "Google Play services wants to access your location", and the location permission for Play services and Google is greyed out ("Device requires this permission to operate"). Android's own location switch is on, so WSA forwards apps' location requests to Windows, which refuses. Play services and Google are privileged system apps, so their permission can't be changed individually.
 
-**Fix:** change `debug.stagefright.ccodec=0` → `4` inside `vendor.vhdx` with [`Patch-VendorCcodec.ps1`](scripts/Patch-VendorCcodec.ps1). The new value is the same length, so it's a direct byte patch: no Linux tools needed. ext4 doesn't checksum file data, and VHDX doesn't checksum payload blocks. The string appears twice (the file plus a filesystem journal copy), and both get patched.
+Turn location off for all of Android: `adb shell cmd location set-location-enabled false`, or Settings → Location → **Use location**. **WSA turns it back on at every boot**, so with root, install the Magisk boot script that switches it off after each boot:
 
 ```powershell
-WsaClient /shutdown          # then wait until vmmemWSA has exited
-.\scripts\Patch-VendorCcodec.ps1                 # backs up, patches, verifies build.prop via 7-Zip
-.\scripts\Patch-VendorCcodec.ps1 -Revert         # undo
+adb push magisk\service.d\disable-location.sh /data/local/tmp/
+adb shell "su -c 'mkdir -p /data/adb/service.d && cp /data/local/tmp/disable-location.sh /data/adb/service.d/ && chmod 755 /data/adb/service.d/disable-location.sh'"
 ```
 
-After restarting WSA, `dumpsys media.player` lists `c2.android.avc/vp8/vp9.decoder` (H.264 up to High profile 5.2, max 2048×2048) plus the audio decoders.
+To undo, delete `/data/adb/service.d/disable-location.sh` as root.
 
-**Then clear YouTube's storage once** (Android Settings → Apps → YouTube → Storage → Clear storage). YouTube saves its "no decoders" result and keeps refusing to play until it's reset.
+---
 
-**Limits:** software decoding only. 1080p is fine, but it costs CPU and battery, and 4K may stutter. No AV1 or HEVC decoder is listed.
+## Limits
+
+- **64-bit apps only.** Android reports only `arm64-v8a`; apps without it fail with `INSTALL_FAILED_NO_MATCHING_ABIS`.
+- **60 fps maximum.** Android sees a single 60 Hz display, whatever the monitor's refresh rate. If a game feels sluggish, check its own frame limiter: GTA: San Andreas' limiter held it near 30 fps with uneven pacing until it was turned off.
+- **Software video decoding** (see above).
+- `.apkm` files from APKMirror are encrypted; use APKMirror's installer app for those.
+
+## Hashes
 
 | File | SHA-256 |
 |---|---|
 | `wsa-patched-0.0.2.7z` | `b1582feef760fdd7cd9897de767a37d5d476a91187f1fb7b50e86786e56e265a` |
-| `vendor.vhdx` from that archive (unmodified) | `d7604cb53721650592798f0a0b354b234ee502daebda999868de5f5132bb87ae` |
-| `vendor.vhdx` after the patch | `2a8279a2ef3e8d8891746b97fa02ef2c1876ae7f4bce6611632a510e121c1d6e` |
-
-### Why not hardware decoding?
-
-The stock image's hardware decoder service, `/vendor/bin/hw/android.hardware.media.omx@1.0-service`, is a **32-bit ARM binary** (ELF32, machine `0x28`), so it can't run on Snapdragon X. The 64-bit plugin it would load (`lib64/libstagefrighthw.so`, which provides the `OMX.android.latte.*` host decoders) exists in both the stock and patched images. The missing piece is a 64-bit build of the service, which Microsoft never shipped. Transplanting one from another Android 13 arm64 build might work, but I haven't tried it.
-
----
-
-## Root: Magisk build never boots
-
-**Symptom:** with WSABuilds' Magisk build (`…with-magisk-30.6.30600.-stable…`), WSA behaves exactly like Problem 1, even with snickler's patched images: about 2 minutes of "Starting…", then `WsaClient.exe` crashes with `0xc0000409`. Android never writes a log. The same images boot fine with the stock boot image.
-
-**Cause:** a corrupted file, not Snapdragon X. Magisk on WSA is installed through `Tools\initrd.img`, a small boot image whose `/init` is a hook called **lspinit** (from [MagiskOnWSALocal](https://github.com/LSPosed/MagiskOnWSALocal)). It starts WSA's normal init (`/wsainit`) and swaps in `magiskinit` when Android starts. In this build, every `0D 0A` byte pair in lspinit has been rewritten to `0A`: the CRLF → LF conversion Git applies to text files. lspinit is 3 bytes short (387 005 instead of 387 008) and the code after the first damaged spot is misaligned. It dies with `Illegal instruction` before WSA's init ever runs, so the VM never contacts Windows.
-
-Everything else in the boot image is intact: `wsainit` is identical to the stock `/init`, `magiskinit` matches `lib/arm64-v8a/libmagiskinit.so` in Magisk's own APK, and the `.xz` files pass their checksums.
-
-**How it was found:**
-1. [`Trace-WsaBoot.ps1`](scripts/Trace-WsaBoot.ps1) records WSA's diagnostic events (TraceLogging provider `Microsoft.Latte.Client`, GUID `30cb12f5-b71b-5a66-0484-11b8118099da`). On the failed boot it showed `HeartbeatTimeout` with `firstHeartbeatReceived=0` and `virtualMachineStarted=0`: the VM starts, but nothing inside it ever talks to Windows. So the failure is in the boot image, before Android starts.
-2. Running the boot image's binaries from a normal (non-root) WSA boot via `adb shell` in `/data/local/tmp`: `magiskinit` runs, but `lspinit` gives `Illegal instruction`. The official lspinit runs fine (it prints `Hello from lspinit…` and exits because it isn't PID 1).
-3. A byte comparison with the official file showed the CRLF → LF damage.
-
-**Fix:**
-
-```powershell
-.\scripts\Repair-MagiskInitrd.ps1 -Source <Magisk build>\Tools\initrd.img -Output .\initrd.magisk-fixed.img
-WsaClient /shutdown
-Copy-Item C:\WSA\Tools\initrd.img C:\WSA\Tools\initrd.stock.img     # backup
-Copy-Item .\initrd.magisk-fixed.img C:\WSA\Tools\initrd.img
-```
-
-The script downloads lspinit from a pinned MagiskOnWSALocal commit, checks its SHA-256, confirms the damaged copy is exactly that file with CRLF → LF applied, and writes a new boot image. You only need the Magisk build's `initrd.img`; the rest of the install can be the NoGApps build with snickler's images, as above.
-
-After starting WSA, `adb shell su -c id` gives `uid=0(root) … context=u:r:magisk:s0`, `magisk -v` gives `30.6:MAGISK:R`, and the Magisk app (`com.topjohnwu.magisk`) is installed. Video, networking and installed apps keep working, and root survives restarts. To go back to no root, copy `initrd.stock.img` back.
-
-**Notes:**
-- **Magisk app missing from the Start menu / WSA's Apps list.** It comes preinstalled in the image, and WSA only creates entries for apps installed while it's running. Reinstall it over itself once:
-  `adb shell 'cp "$(pm path com.topjohnwu.magisk | cut -d: -f2)" /data/local/tmp/m.apk && pm install -r /data/local/tmp/m.apk'`
-- **Don't use the app's Update button.** On WSA, Magisk lives in `Tools\initrd.img` on the Windows side, which the app can't patch. A newer Magisk means rebuilding `initrd.img` with the new `magiskinit`/`magisk` files.
-- **Zygisk shows "Disabled"** because it's off by default (no `zygisk` key in the Magisk database). Turn it on in Magisk → Settings → Zygisk and restart WSA if you need it (LSPosed, DenyList, Play Integrity modules). Not tested on this setup yet.
-- The image includes one module, `lsp_cust` ("WSA Customization" from the MagiskOnWSALocal developers: VPN dialog, device admin, managed users).
-
-| File | SHA-256 |
-|---|---|
-| Official `lspinit` (MagiskOnWSALocal `b406112`, `bin/arm64/lspinit`) | `19bb3433b76d870327f3ef85a5401f3dc6ecf1424d780f9447b6fac628aba498` |
-| `lspinit` in the WSABuilds Magisk build (damaged) | `321af8cf1e93780fa5e809c4eb74a65b787b6f6e47c34db6d83917bdeac82c77` |
-| `Tools\initrd.img` in that build (damaged) | `8c3669884981c1dd5eef56d04274f5586bbe66fe1a6bbb52a3319c570b664685` |
-| `initrd.img` written by `Repair-MagiskInitrd.ps1` | `6b026492a6db87f36ce609aaaa7372fd268f0f212b9948574fa73e99c39a26a8` |
-
----
-
-## Installing APKs
-
-1. In WSA Settings → Advanced settings, turn on **Developer mode**.
-2. Get adb from Google's [platform-tools](https://developer.android.com/tools/releases/platform-tools) and unpack it to `%LOCALAPPDATA%\Android\platform-tools`.
-3. Run `adb connect 127.0.0.1:58526` and approve the "Allow USB debugging" prompt once.
-4. Run `adb install app.apk`. For split bundles (`.xapk`/`.apks`), unzip the bundle and run `adb install-multiple *.apk`.
-
-Or run [`Register-InstallToWSA.ps1`](scripts/Register-InstallToWSA.ps1) once, then right-click an APK and choose **Install to WSA**. In Windows 11 it's under *Show more options*. The script handles bundles and OBB game data, and explains errors such as `INSTALL_FAILED_NO_MATCHING_ABIS`.
-
-**Notes:**
-- Only `arm64-v8a` apps run: Android reports no 32-bit ABI on this hardware.
-- `.apkm` files from APKMirror are encrypted; use APKMirror's own installer app for those.
-- `adb root` isn't available: the build is `user` with `ro.debuggable=0`.
-
----
-
-## "Google Play services wants to access your location" keeps popping up
-
-**Symptom:** with Windows location turned off, a Windows notification keeps saying "Google Play services wants to access your location. Allow location access for Windows Subsystem for Android in Windows privacy settings." In Android Settings → Apps → Google Play services (or Google) → Permissions → Location, every option is greyed out with "Device requires this permission to operate".
-
-**Cause:** Android's own location switch is separate from Windows' and is **on** by default. When an Android app asks for location, WSA forwards the request to Windows. Windows location is off, so WSA shows the notification instead, and Play services keeps asking. The options are greyed out because Play services and the Google app are privileged system apps: their location permission is locked by the system image and can't be changed in Settings without root.
-
-**Fix:** turn off location for the whole Android system. It applies to every app, including the locked ones, so WSA no longer has anything to ask Windows for.
-
-```powershell
-adb -s 127.0.0.1:58526 shell cmd location set-location-enabled false   # true to turn it back on
-```
-
-Or in Android Settings → Location, turn off **Use location**.
-
-**WSA turns location back on at every boot**, so this only lasts until WSA restarts. With root, make it permanent with the Magisk boot script [`disable-location.sh`](magisk/service.d/disable-location.sh). It waits for boot to finish, then switches location off:
-
-```powershell
-adb -s 127.0.0.1:58526 push magisk\service.d\disable-location.sh /data/local/tmp/
-adb -s 127.0.0.1:58526 shell "su -c 'mkdir -p /data/adb/service.d && cp /data/local/tmp/disable-location.sh /data/adb/service.d/ && chmod 755 /data/adb/service.d/disable-location.sh'"
-```
-
-To undo, delete `/data/adb/service.d/disable-location.sh` (as root) and restart WSA.
+| `vendor.vhdx` from it, unmodified | `d7604cb53721650592798f0a0b354b234ee502daebda999868de5f5132bb87ae` |
+| `vendor.vhdx` after `Patch-VendorCcodec.ps1` | `2a8279a2ef3e8d8891746b97fa02ef2c1876ae7f4bce6611632a510e121c1d6e` |
+| WSABuilds Magisk `Tools\initrd.img` (damaged) | `8c3669884981c1dd5eef56d04274f5586bbe66fe1a6bbb52a3319c570b664685` |
+| `lspinit` in it (damaged) | `321af8cf1e93780fa5e809c4eb74a65b787b6f6e47c34db6d83917bdeac82c77` |
+| Official `lspinit` (MagiskOnWSALocal `b406112`) | `19bb3433b76d870327f3ef85a5401f3dc6ecf1424d780f9447b6fac628aba498` |
+| `initrd.img` from `Repair-MagiskInitrd.ps1` | `6b026492a6db87f36ce609aaaa7372fd268f0f212b9948574fa73e99c39a26a8` |
