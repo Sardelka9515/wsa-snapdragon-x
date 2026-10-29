@@ -1,14 +1,14 @@
 # WSA on Snapdragon X
 
-Notes and scripts for getting Windows Subsystem for Android running on a **Snapdragon X** (Oryon) laptop, which has no 32-bit ARM support. It covers booting, networking behind simplewall, and fixing video playback.
+Notes and scripts for getting Windows Subsystem for Android running on a **Snapdragon X** (Oryon) laptop, which has no 32-bit ARM support. It covers booting, root, networking behind simplewall, and fixing video playback.
 
-**Result:** Android 13 boots, Play Store sign-in works, YouTube plays (software decoding). No root.
+**Result:** Android 13 boots with **root (Magisk 30.6)**, Play Store sign-in works, YouTube plays (software decoding).
 
 | | |
 |---|---|
 | PC | Snapdragon X Plus X1P64100 (10 cores), Adreno X1-85, 16 GB RAM |
 | Windows | 11 Home, build 26200 (25H2), ARM64 |
-| WSA build | [WSABuilds](https://github.com/MustardChef/WSABuilds) LTS 8: `WSA_2407.40000.4.0_arm64_Release-Nightly-NoGApps-NoAmazon.7z` |
+| WSA build | [WSABuilds](https://github.com/MustardChef/WSABuilds) LTS 8: `WSA_2407.40000.4.0_arm64_Release-Nightly-NoGApps-NoAmazon.7z`, plus the repaired `Tools\initrd.img` from the `with-magisk-30.6.30600.-stable-NoGApps-NoAmazon` build for root |
 | Android images | [snickler/WSA-Patched](https://github.com/snickler/WSA-Patched) 0.0.2: `wsa-patched-0.0.2.7z` (4 × `.vhdx`) |
 | Install folder | `C:\WSA` (WSA runs from it, so it must stay put) |
 | Firewall | [simplewall](https://github.com/henrypp/simplewall) 3.9.1, allow-list mode |
@@ -17,6 +17,9 @@ Notes and scripts for getting Windows Subsystem for Android running on a **Snapd
 
 | Script | What it does |
 |---|---|
+| [`scripts/Repair-MagiskInitrd.ps1`](scripts/Repair-MagiskInitrd.ps1) | Fixes "Magisk build never boots": repairs the corrupted boot hook in WSABuilds' Magisk `initrd.img`. |
+| [`scripts/Trace-WsaBoot.ps1`](scripts/Trace-WsaBoot.ps1) | Records WSA's own diagnostic events (boot progress, why the VM was stopped). Admin only. |
+| [`magisk/service.d/disable-location.sh`](magisk/service.d/disable-location.sh) | Magisk boot script that keeps Android's location off (see the location section). |
 | [`scripts/Patch-VendorCcodec.ps1`](scripts/Patch-VendorCcodec.ps1) | Fixes "no video": turns on Android's software decoders in the patched `vendor.vhdx`. Backs up first and supports `-Revert`. |
 | [`scripts/Add-SimplewallWsaDns.ps1`](scripts/Add-SimplewallWsaDns.ps1) | Fixes "no internet in Android" behind simplewall: adds an inbound DNS rule for the WSA VM. |
 | [`scripts/Install-ToWSA.ps1`](scripts/Install-ToWSA.ps1) | Installs an `.apk` / `.xapk` / `.apks` via adb. Starts WSA if needed and explains common errors. |
@@ -41,7 +44,7 @@ The scripts run in Windows PowerShell 5.1 or PowerShell 7, for example `powershe
 
 **What did not work:**
 - **Stock images**, both the GApps + Magisk build and the plain NoGApps build. The NoGApps test used a fresh data disk: the VM stops within about 20 s, and `WsaClient.exe` crashes repeatedly with `0xc0000409`.
-- **Patched images with the Magisk build** crash the same way, because the Magisk boot hook (initrd) also fails on Snapdragon X. Root isn't currently achievable on this hardware.
+- **Patched images with the Magisk build, as shipped** crash the same way, because the Magisk boot image is corrupted. That one is fixable: see [Root](#root-magisk-build-never-boots).
 
 ---
 
@@ -98,6 +101,41 @@ The stock image's hardware decoder service, `/vendor/bin/hw/android.hardware.med
 
 ---
 
+## Root: Magisk build never boots
+
+**Symptom:** with WSABuilds' Magisk build (`…with-magisk-30.6.30600.-stable…`), WSA behaves exactly like Problem 1, even with snickler's patched images: about 2 minutes of "Starting…", then `WsaClient.exe` crashes with `0xc0000409`. Android never writes a log. The same images boot fine with the stock boot image.
+
+**Cause:** a corrupted file, not Snapdragon X. Magisk on WSA is installed through `Tools\initrd.img`, a small boot image whose `/init` is a hook called **lspinit** (from [MagiskOnWSALocal](https://github.com/LSPosed/MagiskOnWSALocal)). It starts WSA's normal init (`/wsainit`) and swaps in `magiskinit` when Android starts. In this build, every `0D 0A` byte pair in lspinit has been rewritten to `0A`: the CRLF → LF conversion Git applies to text files. lspinit is 3 bytes short (387 005 instead of 387 008) and the code after the first damaged spot is misaligned. It dies with `Illegal instruction` before WSA's init ever runs, so the VM never contacts Windows.
+
+Everything else in the boot image is intact: `wsainit` is identical to the stock `/init`, `magiskinit` matches `lib/arm64-v8a/libmagiskinit.so` in Magisk's own APK, and the `.xz` files pass their checksums.
+
+**How it was found:**
+1. [`Trace-WsaBoot.ps1`](scripts/Trace-WsaBoot.ps1) records WSA's diagnostic events (TraceLogging provider `Microsoft.Latte.Client`, GUID `30cb12f5-b71b-5a66-0484-11b8118099da`). On the failed boot it showed `HeartbeatTimeout` with `firstHeartbeatReceived=0` and `virtualMachineStarted=0`: the VM starts, but nothing inside it ever talks to Windows. So the failure is in the boot image, before Android starts.
+2. Running the boot image's binaries from a normal (non-root) WSA boot via `adb shell` in `/data/local/tmp`: `magiskinit` runs, but `lspinit` gives `Illegal instruction`. The official lspinit runs fine (it prints `Hello from lspinit…` and exits because it isn't PID 1).
+3. A byte comparison with the official file showed the CRLF → LF damage.
+
+**Fix:**
+
+```powershell
+.\scripts\Repair-MagiskInitrd.ps1 -Source <Magisk build>\Tools\initrd.img -Output .\initrd.magisk-fixed.img
+WsaClient /shutdown
+Copy-Item C:\WSA\Tools\initrd.img C:\WSA\Tools\initrd.stock.img     # backup
+Copy-Item .\initrd.magisk-fixed.img C:\WSA\Tools\initrd.img
+```
+
+The script downloads lspinit from a pinned MagiskOnWSALocal commit, checks its SHA-256, confirms the damaged copy is exactly that file with CRLF → LF applied, and writes a new boot image. You only need the Magisk build's `initrd.img`; the rest of the install can be the NoGApps build with snickler's images, as above.
+
+After starting WSA, `adb shell su -c id` gives `uid=0(root) … context=u:r:magisk:s0`, `magisk -v` gives `30.6:MAGISK:R`, and the Magisk app (`com.topjohnwu.magisk`) is installed. Video, networking and installed apps keep working, and root survives restarts. To go back to no root, copy `initrd.stock.img` back.
+
+| File | SHA-256 |
+|---|---|
+| Official `lspinit` (MagiskOnWSALocal `b406112`, `bin/arm64/lspinit`) | `19bb3433b76d870327f3ef85a5401f3dc6ecf1424d780f9447b6fac628aba498` |
+| `lspinit` in the WSABuilds Magisk build (damaged) | `321af8cf1e93780fa5e809c4eb74a65b787b6f6e47c34db6d83917bdeac82c77` |
+| `Tools\initrd.img` in that build (damaged) | `8c3669884981c1dd5eef56d04274f5586bbe66fe1a6bbb52a3319c570b664685` |
+| `initrd.img` written by `Repair-MagiskInitrd.ps1` | `6b026492a6db87f36ce609aaaa7372fd268f0f212b9948574fa73e99c39a26a8` |
+
+---
+
 ## Installing APKs
 
 1. In WSA Settings → Advanced settings, turn on **Developer mode**.
@@ -126,4 +164,13 @@ Or run [`Register-InstallToWSA.ps1`](scripts/Register-InstallToWSA.ps1) once, th
 adb -s 127.0.0.1:58526 shell cmd location set-location-enabled false   # true to turn it back on
 ```
 
-Or in Android Settings → Location, turn off **Use location**. The setting survives WSA restarts.
+Or in Android Settings → Location, turn off **Use location**.
+
+**WSA turns location back on at every boot**, so this only lasts until WSA restarts. With root, make it permanent with the Magisk boot script [`disable-location.sh`](magisk/service.d/disable-location.sh). It waits for boot to finish, then switches location off:
+
+```powershell
+adb -s 127.0.0.1:58526 push magisk\service.d\disable-location.sh /data/local/tmp/
+adb -s 127.0.0.1:58526 shell "su -c 'mkdir -p /data/adb/service.d && cp /data/local/tmp/disable-location.sh /data/adb/service.d/ && chmod 755 /data/adb/service.d/disable-location.sh'"
+```
+
+To undo, delete `/data/adb/service.d/disable-location.sh` (as root) and restart WSA.
