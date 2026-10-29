@@ -111,3 +111,19 @@ Or run [`Register-InstallToWSA.ps1`](scripts/Register-InstallToWSA.ps1) once, th
 - Only `arm64-v8a` apps run: Android reports no 32-bit ABI on this hardware.
 - `.apkm` files from APKMirror are encrypted; use APKMirror's own installer app for those.
 - `adb root` isn't available: the build is `user` with `ro.debuggable=0`.
+
+---
+
+## "Google Play services wants to access your location" keeps popping up
+
+**Symptom:** with Windows location turned off, a Windows notification keeps saying "Google Play services wants to access your location. Allow location access for Windows Subsystem for Android in Windows privacy settings." In Android Settings → Apps → Google Play services (or Google) → Permissions → Location, every option is greyed out with "Device requires this permission to operate".
+
+**Cause:** Android's own location switch is separate from Windows' and is **on** by default. When an Android app asks for location, WSA forwards the request to Windows. Windows location is off, so WSA shows the notification instead, and Play services keeps asking. The options are greyed out because Play services and the Google app are privileged system apps: their location permission is locked by the system image and can't be changed in Settings without root.
+
+**Fix:** turn off location for the whole Android system. It applies to every app, including the locked ones, so WSA no longer has anything to ask Windows for.
+
+```powershell
+adb -s 127.0.0.1:58526 shell cmd location set-location-enabled false   # true to turn it back on
+```
+
+Or in Android Settings → Location, turn off **Use location**. The setting survives WSA restarts.
