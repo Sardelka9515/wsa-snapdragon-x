@@ -4,7 +4,7 @@ How to run Windows Subsystem for Android on **Snapdragon X** (Oryon) PCs, which 
 
 **Result:** Android 13 with Google Play, **root (Magisk 30.6)**, working internet behind a firewall, and video playback.
 
-Tested on a Snapdragon X Plus X1P64100 (Adreno X1-85, 16 GB), Windows 11 build 26200, with [WSABuilds](https://github.com/MustardChef/WSABuilds) LTS 8 (`2407.40000.4.0` arm64) and [snickler/WSA-Patched](https://github.com/snickler/WSA-Patched) 0.0.2.
+Tested on a Snapdragon X Plus X1P64100 (Adreno X1-85, 16 GB), Windows 11 build 26200, with [WSABuilds](https://github.com/MustardChef/WSABuilds) LTS 8 (`2407.40000.4.0` arm64) and [snickler/WSA-Patched](https://github.com/snickler/WSA-Patched/releases/tag/0.0.2) 0.0.2.
 
 ## Setup
 
@@ -12,7 +12,7 @@ Tested on a Snapdragon X Plus X1P64100 (Adreno X1-85, 16 GB), Windows 11 build 2
 - From WSABuilds' LTS 8 arm64 release:
   - `WSA_2407.40000.4.0_arm64_Release-Nightly-NoGApps-NoAmazon.7z`
   - `WSA_2407.40000.4.0_arm64_Release-Nightly-with-magisk-30.6.30600.-stable-NoGApps-NoAmazon.7z` (only for root; you need just its boot image)
-- From snickler/WSA-Patched 0.0.2: `wsa-patched-0.0.2.7z`. These images include Google Play.
+- From the [snickler/WSA-Patched 0.0.2 release](https://github.com/snickler/WSA-Patched/releases/tag/0.0.2) (the repo itself only has a README): `wsa-patched-0.0.2.7z`. These images include Google Play; snickler calls it the "Buggy GApps Edition", but sign-in, Play Store and YouTube work.
 - [7-Zip](https://www.7-zip.org/) and Google's [platform-tools](https://developer.android.com/tools/releases/platform-tools) (adb).
 
 **Steps** (from a clone of this repo, paths as an example):
