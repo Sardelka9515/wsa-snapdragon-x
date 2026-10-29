@@ -127,6 +127,13 @@ The script downloads lspinit from a pinned MagiskOnWSALocal commit, checks its S
 
 After starting WSA, `adb shell su -c id` gives `uid=0(root) … context=u:r:magisk:s0`, `magisk -v` gives `30.6:MAGISK:R`, and the Magisk app (`com.topjohnwu.magisk`) is installed. Video, networking and installed apps keep working, and root survives restarts. To go back to no root, copy `initrd.stock.img` back.
 
+**Notes:**
+- **Magisk app missing from the Start menu / WSA's Apps list.** It comes preinstalled in the image, and WSA only creates entries for apps installed while it's running. Reinstall it over itself once:
+  `adb shell 'cp "$(pm path com.topjohnwu.magisk | cut -d: -f2)" /data/local/tmp/m.apk && pm install -r /data/local/tmp/m.apk'`
+- **Don't use the app's Update button.** On WSA, Magisk lives in `Tools\initrd.img` on the Windows side, which the app can't patch. A newer Magisk means rebuilding `initrd.img` with the new `magiskinit`/`magisk` files.
+- **Zygisk shows "Disabled"** because it's off by default (no `zygisk` key in the Magisk database). Turn it on in Magisk → Settings → Zygisk and restart WSA if you need it (LSPosed, DenyList, Play Integrity modules). Not tested on this setup yet.
+- The image includes one module, `lsp_cust` ("WSA Customization" from the MagiskOnWSALocal developers: VPN dialog, device admin, managed users).
+
 | File | SHA-256 |
 |---|---|
 | Official `lspinit` (MagiskOnWSALocal `b406112`, `bin/arm64/lspinit`) | `19bb3433b76d870327f3ef85a5401f3dc6ecf1424d780f9447b6fac628aba498` |
