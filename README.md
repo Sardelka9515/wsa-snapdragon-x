@@ -106,7 +106,7 @@ Google sign-in fails with "There was a problem communicating with Google servers
 
 With Windows location off, a notification keeps saying "Google Play services wants to access your location", and the location permission for Play services and Google is greyed out ("Device requires this permission to operate"). Android's own location switch is on, so WSA forwards apps' location requests to Windows, which refuses. Play services and Google are privileged system apps, so their permission can't be changed individually.
 
-Turn location off for all of Android: `adb shell cmd location set-location-enabled false`, or Settings → Location → **Use location**. **WSA turns it back on at every boot**, so with root, install the Magisk boot script that switches it off after each boot:
+Turn location off for all of Android: `adb shell cmd location set-location-enabled false`, or Settings → Location → **Use location**. **WSA turns it back on at every boot**, and Play services asks within seconds, so switching it off after boot is too late. With root, install the Magisk boot script, which switches it off as soon as Android's location service starts, before Play services runs, and keeps it off for the first 2 minutes (it logs to `/data/local/tmp/disable-location.log`):
 
 ```powershell
 adb push magisk\service.d\disable-location.sh /data/local/tmp/
