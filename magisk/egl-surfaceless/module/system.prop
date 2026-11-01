@@ -1,3 +1,7 @@
 # Packages whose vertex array objects the GLES wrapper emulates (comma-separated).
 # WSA mishandles VAOs that are deleted and re-created, which tears world geometry in these games.
 debug.gles.vaoemu=com.rockstargames.bully
+
+# Bully: Anniversary Edition frame-rate cap (stock 30). Change live with: adb shell setprop debug.bully.fps 30
+# or persistently with scripts\Set-BullyFps.ps1. Empty = leave the game alone.
+debug.bully.fps=60

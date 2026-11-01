@@ -40,6 +40,9 @@ extern void *dlopen(const char *, int);
 extern void *dlsym(void *, const char *);
 extern int __system_property_get(const char *, char *);
 extern int gettid(void);
+extern int open(const char *, int, ...);
+extern long read(int, void *, unsigned long);
+extern int close(int);
 extern int pthread_mutex_lock(void *);
 extern int pthread_mutex_unlock(void *);
 extern int snprintf(char *, unsigned long, const char *, ...);
@@ -263,8 +266,101 @@ REAL(glDrawElementsInstanced, void, GLenum, GLsizei, GLenum, const void *, GLsiz
 REAL(glDrawArrays, void, GLenum, GLint, GLsizei)
 REAL(glDrawArraysInstanced, void, GLenum, GLint, GLsizei, GLsizei)
 
+/*
+ * ---- Bully: Anniversary Edition frame-rate cap ----
+ * The game sleeps in Application::ClampFPS until 1/maxFPS has passed since the
+ * last frame; maxFPS is a float in the Application object (offset 0x1c, set to
+ * 30 at start; minFPS 10 at 0x18). debug.bully.fps (e.g. 60, or 30 for stock)
+ * is polled about twice a second and written there, so it can be flipped live.
+ * The object is found through libGame.so's exported 'application' pointer; the
+ * write only happens if both fields hold plausible values.
+ */
+typedef struct { unsigned long addr; const char *name; const void *phdr; unsigned short phnum; } dl_info_t;
+extern int dl_iterate_phdr(int (*cb)(dl_info_t *, unsigned long, void *), void *);
+typedef struct { unsigned p_type, p_flags; unsigned long p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_align; } phdr64_t;
+typedef struct { long tag; unsigned long val; } dyn64_t;
+typedef struct { unsigned name; unsigned char info, other; unsigned short shndx; unsigned long value, size; } sym64_t;
+
+static unsigned long g_bully_app_sym;      /* address of libGame.so's 'application' pointer, once found */
+static int g_bully_state;                  /* 0 unknown, 1 Bully process, -1 not Bully / not found */
+static unsigned g_fps_poll;
+
+static unsigned gnu_hash(const char *s) { unsigned h = 5381; while (*s) h = h * 33 + (unsigned char)*s++; return h; }
+
+/* Look up an exported symbol in a loaded object via its GNU hash table */
+static unsigned long find_symbol(unsigned long base, const phdr64_t *ph, int n, const char *want) {
+    const dyn64_t *dyn = 0;
+    for (int i = 0; i < n; i++) if (ph[i].p_type == 2 /*PT_DYNAMIC*/) dyn = (const dyn64_t *)(base + ph[i].p_vaddr);
+    if (!dyn) return 0;
+    unsigned long symtab = 0, strtab = 0, gnuhash = 0;
+    for (; dyn->tag; dyn++) {
+        unsigned long v = dyn->val < base ? base + dyn->val : dyn->val;   /* bionic leaves these unrelocated */
+        if (dyn->tag == 6) symtab = v;                      /* DT_SYMTAB */
+        else if (dyn->tag == 5) strtab = v;                 /* DT_STRTAB */
+        else if (dyn->tag == 0x6ffffef5) gnuhash = v;       /* DT_GNU_HASH */
+    }
+    if (!symtab || !strtab || !gnuhash) return 0;
+    const unsigned *gh = (const unsigned *)gnuhash;
+    unsigned nbuckets = gh[0], symoffset = gh[1], bloom_size = gh[2];
+    const unsigned *buckets = gh + 4 + bloom_size * 2;      /* 64-bit bloom words */
+    const unsigned *chain = buckets + nbuckets;
+    unsigned h = gnu_hash(want), idx = buckets[h % nbuckets];
+    if (idx < symoffset) return 0;
+    for (;; idx++) {
+        unsigned h2 = chain[idx - symoffset];
+        const sym64_t *s = (const sym64_t *)symtab + idx;
+        if ((h | 1) == (h2 | 1) && !__builtin_strcmp(want, (const char *)strtab + s->name)) return base + s->value;
+        if (h2 & 1) return 0;
+    }
+}
+
+static int find_libgame(dl_info_t *info, unsigned long size, void *data) {
+    (void)size; (void)data;
+    const char *n = info->name;
+    if (!n) return 0;
+    unsigned long len = __builtin_strlen(n);
+    if (len < 11 || __builtin_strcmp(n + len - 11, "/libGame.so")) return 0;
+    g_bully_app_sym = find_symbol(info->addr, info->phdr, info->phnum, "application");
+    return 1;
+}
+
+static void bully_fps_poll(void) {
+    if (g_bully_state < 0 || (++g_fps_poll % 120)) return;            /* ~twice a second */
+    if (!g_bully_state) {
+        char cmd[64] = { 0 };
+        int fd = open("/proc/self/cmdline", 0);
+        if (fd >= 0) { read(fd, cmd, sizeof(cmd) - 1); close(fd); }
+        if (__builtin_strcmp(cmd, "com.rockstargames.bully")) { g_bully_state = -1; return; }
+        g_bully_state = 1;
+    }
+    char v[92] = { 0 };
+    __system_property_get("debug.bully.fps", v);
+    float want = 0;
+    for (const char *p = v; *p >= '0' && *p <= '9'; p++) want = want * 10 + (float)(*p - '0');
+    if (want < 1 || want > 240) return;                                /* unset: leave the game alone */
+    if (!g_bully_app_sym) {
+        dl_iterate_phdr(find_libgame, 0);
+        if (!g_bully_app_sym) return;                                  /* libGame.so not loaded yet */
+        LOG("[%d] Bully: 'application' pointer at %#lx", gettid(), g_bully_app_sym);
+    }
+    float *app = *(float **)g_bully_app_sym;
+    if (!app) return;                                                  /* not created yet */
+    float *minfps = app + 6, *maxfps = app + 7;                        /* +0x18, +0x1c */
+    if (*minfps < 1 || *minfps > 60 || *maxfps < 1 || *maxfps > 240) {
+        static int warned;
+        if (!warned++) LOG("Bully: unexpected Application fields (%f, %f), not touching them", *minfps, *maxfps);
+        g_bully_state = -1;
+        return;
+    }
+    if (*maxfps != want) {
+        LOG("[%d] Bully: max fps %g -> %g", gettid(), *maxfps, want);
+        *maxfps = want;
+    }
+}
+
 EXPORT void glBindFramebuffer(GLenum target, GLuint fb) {
     if (g_reupload_pending) { g_reupload_pending = 0; reupload_all(); }
+    bully_fps_poll();
     r_glBindFramebuffer(target, fb);
     if (recording()) {
         if (fb && (target == 0x8D40 || target == GL_DRAW_FRAMEBUFFER))

@@ -1,6 +1,6 @@
 id=wsa_egl_surfaceless
 name=WSA GL fixes
-version=v2
-versionCode=2
+version=v3
+versionCode=3
 author=Sardelka9515
-description=Fixes for WSA's OpenGL ES drivers: adds surfaceless EGL contexts (startup crashes, e.g. Bully) and emulates vertex array objects for the apps in debug.gles.vaoemu (torn geometry, e.g. Bully).
+description=Fixes for WSA's OpenGL ES drivers: adds surfaceless EGL contexts (startup crashes, e.g. Bully) and emulates vertex array objects for the apps in debug.gles.vaoemu (torn geometry, e.g. Bully), and sets Bully's frame-rate cap from debug.bully.fps.
