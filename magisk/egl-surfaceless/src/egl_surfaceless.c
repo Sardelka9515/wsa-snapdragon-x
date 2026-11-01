@@ -84,7 +84,7 @@ static int init(void) {
             r_pbuffer      = dlsym(h, "eglCreatePbufferSurface");
             r_destroysurf  = dlsym(h, "eglDestroySurface");
             r_cursurf      = dlsym(h, "eglGetCurrentSurface");
-            r_log          = dlsym((void *)0 /*RTLD_DEFAULT*/, "__android_log_print");
+            r_log          = dlsym(dlopen("liblog.so", RTLD_NOW), "__android_log_print");
             __atomic_store_n(&g_real, h, __ATOMIC_RELEASE);
         }
     }
