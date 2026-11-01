@@ -1,0 +1,6 @@
+id=wsa_egl_surfaceless
+name=WSA EGL surfaceless contexts
+version=v1
+versionCode=1
+author=Sardelka9515
+description=Adds EGL_KHR_surfaceless_context to WSA's EGL driver, so games that make a context current without a surface (e.g. Bully: Anniversary Edition) don't crash.

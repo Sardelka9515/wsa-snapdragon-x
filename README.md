@@ -58,6 +58,7 @@ All scripts run in Windows PowerShell 5.1 or PowerShell 7 (`powershell -Executio
 | [`Install-ToWSA.ps1`](scripts/Install-ToWSA.ps1) | The installer behind that menu entry: starts WSA if needed, installs APKs and bundles (with OBB data), explains common errors. |
 | [`Trace-WsaBoot.ps1`](scripts/Trace-WsaBoot.ps1) | Records WSA's own diagnostic events, for debugging boots that fail before Android logs anything. Admin only. |
 | [`disable-location.sh`](magisk/service.d/disable-location.sh) | Magisk boot script that keeps Android's location off. |
+| [`egl-surfaceless`](magisk/egl-surfaceless) | Magisk module that adds surfaceless EGL contexts to WSA, fixing games that crash at startup (e.g. Bully). |
 
 ---
 
@@ -114,6 +115,21 @@ adb shell "su -c 'mkdir -p /data/adb/service.d && cp /data/local/tmp/disable-loc
 ```
 
 To undo, delete `/data/adb/service.d/disable-location.sh` as root.
+
+### Games crashing at startup: surfaceless EGL contexts
+
+Bully: Anniversary Edition crashes a few seconds after launch (`strlen` on a null pointer in `perfprofile::LoadRendererDetails()`). Its game thread makes its OpenGL ES context current before the window surface exists, i.e. `eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, ctx)`. Real devices support this (`EGL_KHR_surfaceless_context`). WSA's EGL driver doesn't and fails with `EGL_BAD_MATCH`, so `glGetString()` returns null.
+
+The [`egl-surfaceless`](magisk/egl-surfaceless) Magisk module (root required) wraps WSA's driver, `/vendor/lib64/egl/libEGL_emulation.so`. A surfaceless `eglMakeCurrent` binds a hidden 1×1 pbuffer made from the context's own config, and the extension is advertised. Everything else goes to the real driver. With it, Bully runs unmodified.
+
+```powershell
+# needs Zig (ziglang.org, arm64 Windows build) for the C compiler; no Android NDK
+.\magisk\egl-surfaceless\Build-Module.ps1 -Zig <path>\zig.exe
+adb push magisk\egl-surfaceless\wsa-egl-surfaceless.zip /data/local/tmp/
+adb shell su -c "magisk --install-module /data/local/tmp/wsa-egl-surfaceless.zip"
+```
+
+Restart WSA afterwards; `adb shell dumpsys SurfaceFlinger | grep surfaceless` confirms it's active. To remove it, uninstall the module in the Magisk app (or `touch /data/adb/modules/wsa_egl_surfaceless/disable` as root) and restart WSA. If Android ever failed to start with it, booting once with the non-root `initrd.img` skips all Magisk modules.
 
 ---
 

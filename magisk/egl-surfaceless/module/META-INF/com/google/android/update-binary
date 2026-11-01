@@ -1,0 +1,11 @@
+#!/sbin/sh
+# Standard Magisk module installer stub
+umask 022
+ui_print() { echo "$1"; }
+OUTFD=$2
+ZIPFILE=$3
+mount /data 2>/dev/null
+[ -f /data/adb/magisk/util_functions.sh ] || { ui_print "! Magisk is required"; exit 1; }
+. /data/adb/magisk/util_functions.sh
+install_module
+exit 0
