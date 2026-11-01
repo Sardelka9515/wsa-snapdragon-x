@@ -8,10 +8,15 @@ driver changes.
 import sys
 from elftools.elf.elffile import ELFFile
 
-OVERRIDDEN = {'_Z14getProcAddressPKc', 'glVertexAttribPointer', 'glVertexAttribIPointer', 'glDrawElements',
-              'glDrawRangeElements', 'glDrawElementsInstanced', 'glDrawArrays', 'glDrawArraysInstanced',
-              'glMapBufferRange', 'glFlushMappedBufferRange', 'glBufferData', 'glBufferSubData',
-              'glVertexAttribDivisor', 'glBindVertexArray', 'glEnable', 'glDisable'}
+OVERRIDDEN = {'_Z14getProcAddressPKc', 'glBindFramebuffer', 'glDrawBuffers', 'glReadBuffer',
+              'glFramebufferTexture2D', 'glFramebufferRenderbuffer', 'glClear', 'glColorMask',
+              'glBlitFramebuffer', 'glCopyTexSubImage2D', 'glInvalidateFramebuffer', 'glBindTexture',
+              'glGenerateMipmap', 'glDrawElements', 'glDrawRangeElements', 'glDrawElementsInstanced',
+              'glDrawArrays', 'glDrawArraysInstanced', 'glBufferData', 'glBufferSubData',
+              'glDeleteBuffers', 'glMapBufferRange', 'glGenVertexArrays', 'glDeleteVertexArrays',
+              'glBindVertexArray', 'glIsVertexArray', 'glVertexAttribPointer', 'glVertexAttribIPointer',
+              'glEnableVertexAttribArray', 'glDisableVertexAttribArray', 'glVertexAttribDivisor',
+              'glBindBuffer', 'glGetIntegerv'}
 
 lib, out = sys.argv[1:]
 f = ELFFile(open(lib, 'rb'))

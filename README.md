@@ -58,7 +58,7 @@ All scripts run in Windows PowerShell 5.1 or PowerShell 7 (`powershell -Executio
 | [`Install-ToWSA.ps1`](scripts/Install-ToWSA.ps1) | The installer behind that menu entry: starts WSA if needed, installs APKs and bundles (with OBB data), explains common errors. |
 | [`Trace-WsaBoot.ps1`](scripts/Trace-WsaBoot.ps1) | Records WSA's own diagnostic events, for debugging boots that fail before Android logs anything. Admin only. |
 | [`disable-location.sh`](magisk/service.d/disable-location.sh) | Magisk boot script that keeps Android's location off. |
-| [`egl-surfaceless`](magisk/egl-surfaceless) | Magisk module that adds surfaceless EGL contexts to WSA, fixing games that crash at startup (e.g. Bully). |
+| [`egl-surfaceless`](magisk/egl-surfaceless) | Magisk module "WSA GL fixes": surfaceless EGL contexts (startup crashes) and VAO emulation (torn geometry), e.g. for Bully. |
 
 ---
 
@@ -116,11 +116,12 @@ adb shell "su -c 'mkdir -p /data/adb/service.d && cp /data/local/tmp/disable-loc
 
 To undo, delete `/data/adb/service.d/disable-location.sh` as root.
 
-### Games crashing at startup: surfaceless EGL contexts
+### Games crashing or rendering wrong: the WSA GL fixes module
 
-Bully: Anniversary Edition crashes a few seconds after launch (`strlen` on a null pointer in `perfprofile::LoadRendererDetails()`). Its game thread makes its OpenGL ES context current before the window surface exists, i.e. `eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, ctx)`. Real devices support this (`EGL_KHR_surfaceless_context`). WSA's EGL driver doesn't and fails with `EGL_BAD_MATCH`, so `glGetString()` returns null.
+The [`egl-surfaceless`](magisk/egl-surfaceless) Magisk module (root required; shown as "WSA GL fixes") wraps WSA's graphics drivers in `/vendor/lib64/egl/`. Each wrapper changes a few functions and passes everything else to WSA's own driver. It fixes two WSA bugs, both found with Bully: Anniversary Edition, which now runs unmodified:
 
-The [`egl-surfaceless`](magisk/egl-surfaceless) Magisk module (root required) wraps WSA's driver, `/vendor/lib64/egl/libEGL_emulation.so`. A surfaceless `eglMakeCurrent` binds a hidden 1×1 pbuffer made from the context's own config, and the extension is advertised. Everything else goes to the real driver. With it, Bully runs unmodified.
+- **Startup crash: no surfaceless contexts.** Bully crashes a few seconds after launch (`strlen` on a null pointer in `perfprofile::LoadRendererDetails()`). Its game thread makes its context current before the window surface exists, i.e. `eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, ctx)`. Real devices allow this (`EGL_KHR_surfaceless_context`); WSA fails with `EGL_BAD_MATCH`, so `glGetString()` returns null. The EGL wrapper binds a hidden 1×1 pbuffer made from the context's own config instead, and advertises the extension.
+- **Torn world geometry: vertex array objects.** Bully renders correctly for a short while, then ground and walls tear into long stretched triangles; characters stay fine. The game streams the world in and out, constantly deleting and re-creating VAOs, and WSA's handling of them goes wrong over time. The vertex and index data itself was verified correct: re-sending every buffer changed nothing. For the packages listed in `debug.gles.vaoemu`, the GLES wrapper emulates VAOs: the app gets fake VAO names, WSA only ever sees VAO 0, and each `glBindVertexArray` re-applies that VAO's recorded attribute state. `module/system.prop` sets the list (default `com.rockstargames.bully`). To add a game, edit `/data/adb/modules/wsa_egl_surfaceless/system.prop` as root (comma-separated package names) and restart WSA.
 
 ```powershell
 # needs Zig (ziglang.org, arm64 Windows build) for the C compiler; no Android NDK
@@ -129,7 +130,9 @@ adb push magisk\egl-surfaceless\wsa-egl-surfaceless.zip /data/local/tmp/
 adb shell su -c "magisk --install-module /data/local/tmp/wsa-egl-surfaceless.zip"
 ```
 
-Restart WSA afterwards; `adb shell dumpsys SurfaceFlinger | grep surfaceless` confirms it's active. To remove it, uninstall the module in the Magisk app (or `touch /data/adb/modules/wsa_egl_surfaceless/disable` as root) and restart WSA. If Android ever failed to start with it, booting once with the non-root `initrd.img` skips all Magisk modules.
+Restart WSA afterwards. `adb shell dumpsys SurfaceFlinger | grep surfaceless` and `adb shell getprop debug.gles.vaoemu` confirm it's active. To remove it, uninstall the module in the Magisk app (or `touch /data/adb/modules/wsa_egl_surfaceless/disable` as root) and restart WSA. If Android ever failed to start with it, booting once with the non-root `initrd.img` skips all Magisk modules.
+
+**Debugging other games:** `Build-Module.ps1 -Diagnostics` adds tools to the GLES wrapper (log tag `gles-seq`). `debug.gles.trace` records the sequence of framebuffer calls with a signature per draw (mode, program, vertex formats, offsets). `debug.gles.skip` drops draws matching signature tokens, to find which ones render wrong. `debug.gles.reupload` re-sends all buffer contents. They're how the VAO bug was narrowed down. Games pause when their window loses focus, so trigger them on a timer while the game is in front. Also note: Magisk disables all modules after boots it counts as failed, so after many quick WSA restarts check Magisk → Modules.
 
 ---
 
@@ -138,12 +141,6 @@ Restart WSA afterwards; `adb shell dumpsys SurfaceFlinger | grep surfaceless` co
 - **64-bit apps only.** Android reports only `arm64-v8a`; apps without it fail with `INSTALL_FAILED_NO_MATCHING_ABIS`.
 - **60 fps maximum.** Android sees a single 60 Hz display, whatever the monitor's refresh rate. If a game feels sluggish, check its own frame limiter: GTA: San Andreas' limiter held it near 30 fps with uneven pacing until it was turned off.
 - **Software video decoding** (see above).
-- **Bully: Anniversary Edition renders torn world geometry** (ground and paths stretched into long triangles; characters are fine), even with the surfaceless fix. Not solved. What was ruled out:
-  - **The app side looks normal.** On the Android side the game uses ordinary ES 3.0: VBOs and VAOs, float/byte/short vertex formats, no primitive restart (logged with `Build-Module.ps1 -Gles`).
-  - **Its rejected `glDrawBuffers` calls are harmless.** WSA rejects them, but a spec-compliant phone driver would too. Accepting them blacks out the scene.
-  - **DirectX sees nothing wrong.** With the D3D11 debug layer forced on for `WsaClient.exe` (Graphics Tools + `dxcpl`), there are no D3D11 errors or warnings at all.
-
-  So the bug is most likely in WSA's GL→D3D11 translation (gfxstream + ANGLE inside `WsaClient.exe`), producing valid but wrong data. Finding it would need a frame capture, e.g. an ARM64 build of RenderDoc.
 - `.apkm` files from APKMirror are encrypted; use APKMirror's installer app for those.
 
 ## Hashes

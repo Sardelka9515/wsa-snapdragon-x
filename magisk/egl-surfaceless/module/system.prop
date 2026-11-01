@@ -1,0 +1,3 @@
+# Packages whose vertex array objects the GLES wrapper emulates (comma-separated).
+# WSA mishandles VAOs that are deleted and re-created, which tears world geometry in these games.
+debug.gles.vaoemu=com.rockstargames.bully
