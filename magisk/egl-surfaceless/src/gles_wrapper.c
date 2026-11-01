@@ -429,26 +429,35 @@ EXPORT void glDrawArraysInstanced(GLenum m, GLint f, GLsizei c, GLsizei n) { if 
 /*
  * ---- VAO emulation ----
  * For the packages listed in debug.gles.vaoemu (read when the app first uses a
- * VAO), vertex array objects are emulated here: the app gets fake VAO names,
- * WSA only ever sees VAO 0, and binding a VAO re-applies its recorded vertex
- * attribute state to VAO 0. This sidesteps WSA's own VAO handling.
+ * VAO), vertex array objects are emulated here: the app gets stand-in VAO
+ * names, WSA only ever sees VAO 0, and binding a VAO re-applies its recorded
+ * vertex attribute state to VAO 0 (only what differs from the last one).
+ *
+ * Kept cheap because it runs on every bind and attribute call:
+ *  - a stand-in name is (generation << 13 | slot), so lookup is one array index,
+ *    and a stale name never matches a reused slot;
+ *  - each context caches its bound VAO, so attribute calls don't look anything up;
+ *  - the lock is only taken to create/delete VAOs or register a new context.
  */
-#define MAX_ATTRIBS 16
-#define MAX_VAOS    4096
-#define MAX_CTX     8
+#define MAX_ATTRIBS   16
+#define VAO_SLOT_BITS 13
+#define MAX_VAOS      (1 << VAO_SLOT_BITS)  /* slot 0 unused */
+#define MAX_CTX       8
 #define GL_ARRAY_BUFFER          0x8892
 #define GL_ELEMENT_ARRAY_BUFFER  0x8893
 #define GL_ARRAY_BUFFER_BINDING  0x8894
 #define GL_VERTEX_ARRAY_BINDING  0x85B5
 
 typedef struct { GLint enabled, size, integer, normalized, stride; GLenum type; const void *ptr; GLuint buffer, divisor; } vattr_t;
-typedef struct { void *ctx; GLuint name; int used; GLuint elem; vattr_t a[MAX_ATTRIBS]; } vao_t;
-typedef struct { void *ctx; GLuint cur; vao_t applied; int applied_valid; } ctxstate_t;
+typedef struct { void *ctx; GLuint name; GLuint elem; vattr_t a[MAX_ATTRIBS]; } vao_t;   /* name 0: free */
+typedef struct { void *ctx; GLuint cur; vao_t *bound; vao_t zero; vao_t applied; int applied_valid; } ctxstate_t;
 
 static vao_t g_vaos[MAX_VAOS];
+static unsigned g_gen[MAX_VAOS];
+static unsigned short g_free[MAX_VAOS];
+static int g_nfree = -1;                   /* free-slot stack, built on first use */
 static ctxstate_t g_ctxs[MAX_CTX];
 static long g_vao_lock[8];
-static GLuint g_next_vao = 1;
 static int g_vao_emu = -1;                 /* -1: not decided yet */
 static void *(*r_curctx)(void);
 
@@ -493,39 +502,33 @@ static void default_vao(vao_t *v) {
     v->elem = 0;
 }
 
-/* Caller holds g_vao_lock */
-static vao_t *find_vao(void *ctx, GLuint name, int create) {
-    vao_t *free_slot = 0;
-    for (int i = 0; i < MAX_VAOS; i++) {
-        if (g_vaos[i].used) { if (g_vaos[i].ctx == ctx && g_vaos[i].name == name) return &g_vaos[i]; }
-        else if (!free_slot) free_slot = &g_vaos[i];
-    }
-    if (!create || !free_slot) return 0;
-    free_slot->used = 1; free_slot->ctx = ctx; free_slot->name = name;
-    default_vao(free_slot);
-    return free_slot;
+static vao_t *vao_lookup(void *ctx, GLuint name) {
+    if (!name) return 0;
+    vao_t *v = &g_vaos[name & (MAX_VAOS - 1)];
+    return v->name == name && v->ctx == ctx ? v : 0;
 }
 
-static ctxstate_t *ctx_state(void *ctx) {
-    ctxstate_t *free_slot = 0;
-    for (int i = 0; i < MAX_CTX; i++) {
-        if (g_ctxs[i].ctx == ctx) return &g_ctxs[i];
-        if (!g_ctxs[i].ctx && !free_slot) free_slot = &g_ctxs[i];
-    }
-    if (!free_slot) return 0;
-    __builtin_memset(free_slot, 0, sizeof(*free_slot));
-    free_slot->ctx = ctx;
-    return free_slot;
-}
-
-/* Current (emulated) VAO of this thread's context; name 0 has its own record too */
-static vao_t *cur_vao(ctxstate_t **cs_out) {
+/* This thread's context state (registered on first use), or 0 without a current context */
+static ctxstate_t *ctx_state(void) {
     void *ctx = r_curctx ? r_curctx() : 0;
     if (!ctx) return 0;
-    ctxstate_t *cs = ctx_state(ctx);
-    if (!cs) return 0;
-    if (cs_out) *cs_out = cs;
-    return find_vao(ctx, cs->cur, 1);
+    for (int i = 0; i < MAX_CTX; i++)
+        if (__atomic_load_n(&g_ctxs[i].ctx, __ATOMIC_ACQUIRE) == ctx) return &g_ctxs[i];
+    ctxstate_t *cs = 0;
+    pthread_mutex_lock(g_vao_lock);
+    for (int i = 0; i < MAX_CTX && !cs; i++) if (g_ctxs[i].ctx == ctx) cs = &g_ctxs[i];
+    for (int i = 0; i < MAX_CTX && !cs; i++) {
+        if (g_ctxs[i].ctx) continue;
+        cs = &g_ctxs[i];
+        __builtin_memset(cs, 0, sizeof(*cs));
+        default_vao(&cs->zero);
+        cs->zero.ctx = ctx;
+        cs->bound = &cs->zero;
+        __atomic_store_n(&cs->ctx, ctx, __ATOMIC_RELEASE);
+    }
+    pthread_mutex_unlock(g_vao_lock);
+    if (!cs) LOG("too many GL contexts for VAO emulation");
+    return cs;
 }
 
 /* Make the real VAO 0 match v, sending only what differs from what was applied last */
@@ -541,8 +544,10 @@ static void apply_vao(ctxstate_t *cs, const vao_t *v) {
             if (a->integer) r_glVertexAttribIPointer(i, a->size, a->type, a->stride, a->ptr);
             else r_glVertexAttribPointer(i, a->size, a->type, (GLboolean)a->normalized, a->stride, a->ptr);
         }
-        if (a->enabled) r_glEnableVertexAttribArray(i); else r_glDisableVertexAttribArray(i);
-        r_glVertexAttribDivisor(i, a->divisor);
+        if (!cs->applied_valid || a->enabled != was->enabled) {
+            if (a->enabled) r_glEnableVertexAttribArray(i); else r_glDisableVertexAttribArray(i);
+        }
+        if (!cs->applied_valid || a->divisor != was->divisor) r_glVertexAttribDivisor(i, a->divisor);
         *was = *a;
     }
     if (!cs->applied_valid || cs->applied.elem != v->elem) {
@@ -557,9 +562,18 @@ EXPORT void glGenVertexArrays(GLsizei n, GLuint *arrays) {
     if (!vao_emu_enabled()) { r_glGenVertexArrays(n, arrays); return; }
     void *ctx = r_curctx ? r_curctx() : 0;
     pthread_mutex_lock(g_vao_lock);
+    if (g_nfree < 0) {
+        g_nfree = 0;
+        for (int s = MAX_VAOS - 1; s >= 1; s--) g_free[g_nfree++] = (unsigned short)s;
+    }
     for (GLsizei k = 0; arrays && k < n; k++) {
-        GLuint name = g_next_vao++;
-        if (!find_vao(ctx, name, 1)) LOG("VAO table full");
+        if (!g_nfree) { arrays[k] = 0; LOG("VAO table full (%d)", MAX_VAOS - 1); continue; }
+        int s = g_free[--g_nfree];
+        GLuint name = (++g_gen[s] << VAO_SLOT_BITS) | (GLuint)s;
+        vao_t *v = &g_vaos[s];
+        default_vao(v);
+        v->ctx = ctx;
+        v->name = name;
         arrays[k] = name;
     }
     pthread_mutex_unlock(g_vao_lock);
@@ -567,49 +581,44 @@ EXPORT void glGenVertexArrays(GLsizei n, GLuint *arrays) {
 
 EXPORT void glDeleteVertexArrays(GLsizei n, const GLuint *arrays) {
     if (!vao_emu_enabled()) { r_glDeleteVertexArrays(n, arrays); return; }
+    ctxstate_t *cs = ctx_state();
+    if (!cs) return;
     pthread_mutex_lock(g_vao_lock);
-    ctxstate_t *cs = 0;
-    vao_t *cur = cur_vao(&cs);
-    void *ctx = cs ? cs->ctx : 0;
     for (GLsizei k = 0; arrays && k < n; k++) {
-        if (!arrays[k]) continue;
-        vao_t *v = find_vao(ctx, arrays[k], 0);
+        vao_t *v = vao_lookup(cs->ctx, arrays[k]);
         if (!v) continue;
-        if (cs && cs->cur == arrays[k]) {          /* deleting the bound VAO binds 0 */
+        if (cs->bound == v) {                      /* deleting the bound VAO binds 0 */
             cs->cur = 0;
-            apply_vao(cs, find_vao(ctx, 0, 1));
+            cs->bound = &cs->zero;
+            apply_vao(cs, &cs->zero);
         }
-        v->used = 0;
+        v->name = 0;
+        v->ctx = 0;
+        g_free[g_nfree++] = (unsigned short)(arrays[k] & (MAX_VAOS - 1));
     }
-    (void)cur;
     pthread_mutex_unlock(g_vao_lock);
 }
 
 EXPORT void glBindVertexArray(GLuint name) {
     if (!vao_emu_enabled()) { r_glBindVertexArray(name); return; }
-    pthread_mutex_lock(g_vao_lock);
-    ctxstate_t *cs = 0;
-    cur_vao(&cs);
-    if (cs) {
-        vao_t *v = find_vao(cs->ctx, name, name == 0);
-        if (v) { cs->cur = name; apply_vao(cs, v); }
-    }
-    pthread_mutex_unlock(g_vao_lock);
+    ctxstate_t *cs = ctx_state();
+    if (!cs) return;
+    vao_t *v = name ? vao_lookup(cs->ctx, name) : &cs->zero;
+    if (!v) return;                                /* unknown name: GL_INVALID_OPERATION, ignored */
+    cs->cur = name;
+    cs->bound = v;
+    apply_vao(cs, v);
 }
 
 EXPORT GLboolean glIsVertexArray(GLuint name) {
     if (!vao_emu_enabled()) return r_glIsVertexArray(name);
-    pthread_mutex_lock(g_vao_lock);
-    void *ctx = r_curctx ? r_curctx() : 0;
-    GLboolean r = name && find_vao(ctx, name, 0) ? 1 : 0;
-    pthread_mutex_unlock(g_vao_lock);
-    return r;
+    ctxstate_t *cs = ctx_state();
+    return cs && vao_lookup(cs->ctx, name) ? 1 : 0;
 }
 
 /* Record attribute state into the bound emulated VAO, and pass it through to VAO 0 */
-#define RECORD(body) do { if (vao_emu_enabled()) { pthread_mutex_lock(g_vao_lock); ctxstate_t *cs = 0; \
-    vao_t *v = cur_vao(&cs); if (v && i < MAX_ATTRIBS) { vattr_t *a = &v->a[i]; body; if (cs) cs->applied.a[i] = *a; } \
-    pthread_mutex_unlock(g_vao_lock); } } while (0)
+#define RECORD(body) do { if (vao_emu_enabled() && i < MAX_ATTRIBS) { ctxstate_t *cs = ctx_state(); \
+    if (cs) { vattr_t *a = &cs->bound->a[i]; body; cs->applied.a[i] = *a; } } } while (0)
 
 EXPORT void glVertexAttribPointer(GLuint i, GLint size, GLenum type, GLboolean norm, GLsizei stride, const void *p) {
     r_glVertexAttribPointer(i, size, type, norm, stride, p);
@@ -630,21 +639,15 @@ EXPORT void glVertexAttribDivisor(GLuint i, GLuint d) { r_glVertexAttribDivisor(
 EXPORT void glBindBuffer(GLenum target, GLuint buf) {
     r_glBindBuffer(target, buf);
     if (target == GL_ELEMENT_ARRAY_BUFFER && vao_emu_enabled()) {
-        pthread_mutex_lock(g_vao_lock);
-        ctxstate_t *cs = 0;
-        vao_t *v = cur_vao(&cs);
-        if (v) { v->elem = buf; if (cs) cs->applied.elem = buf; }
-        pthread_mutex_unlock(g_vao_lock);
+        ctxstate_t *cs = ctx_state();
+        if (cs) { cs->bound->elem = buf; cs->applied.elem = buf; }
     }
 }
 
 EXPORT void glGetIntegerv(GLenum pname, GLint *data) {
     if (pname == GL_VERTEX_ARRAY_BINDING && data && g_vao_emu == 1) {
-        pthread_mutex_lock(g_vao_lock);
-        void *ctx = r_curctx ? r_curctx() : 0;
-        ctxstate_t *cs = ctx ? ctx_state(ctx) : 0;
+        ctxstate_t *cs = ctx_state();
         *data = cs ? (GLint)cs->cur : 0;
-        pthread_mutex_unlock(g_vao_lock);
         return;
     }
     r_glGetIntegerv(pname, data);
@@ -653,16 +656,15 @@ EXPORT void glGetIntegerv(GLenum pname, GLint *data) {
 /* Deleting a buffer detaches it from the bound VAO (GL spec); mirror that in the emulated one */
 static void vao_forget_buffers(GLsizei n, const GLuint *ids) {
     if (g_vao_emu != 1 || !ids) return;
-    pthread_mutex_lock(g_vao_lock);
-    ctxstate_t *cs = 0;
-    vao_t *v = cur_vao(&cs);
-    for (GLsizei k = 0; v && k < n; k++) {
+    ctxstate_t *cs = ctx_state();
+    if (!cs) return;
+    vao_t *v = cs->bound;
+    for (GLsizei k = 0; k < n; k++) {
         if (!ids[k]) continue;
         for (int i = 0; i < MAX_ATTRIBS; i++)
-            if (v->a[i].buffer == ids[k]) { v->a[i].buffer = 0; if (cs) cs->applied.a[i].buffer = 0; }
-        if (v->elem == ids[k]) { v->elem = 0; if (cs) cs->applied.elem = 0; }
+            if (v->a[i].buffer == ids[k]) { v->a[i].buffer = 0; cs->applied.a[i].buffer = 0; }
+        if (v->elem == ids[k]) { v->elem = 0; cs->applied.elem = 0; }
     }
-    pthread_mutex_unlock(g_vao_lock);
 }
 
 /* name -> wrapper, for getProcAddress */
