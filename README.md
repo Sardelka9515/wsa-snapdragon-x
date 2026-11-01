@@ -138,6 +138,12 @@ Restart WSA afterwards; `adb shell dumpsys SurfaceFlinger | grep surfaceless` co
 - **64-bit apps only.** Android reports only `arm64-v8a`; apps without it fail with `INSTALL_FAILED_NO_MATCHING_ABIS`.
 - **60 fps maximum.** Android sees a single 60 Hz display, whatever the monitor's refresh rate. If a game feels sluggish, check its own frame limiter: GTA: San Andreas' limiter held it near 30 fps with uneven pacing until it was turned off.
 - **Software video decoding** (see above).
+- **Bully: Anniversary Edition renders torn world geometry** (ground and paths stretched into long triangles; characters are fine), even with the surfaceless fix. Not solved. What was ruled out:
+  - **The app side looks normal.** On the Android side the game uses ordinary ES 3.0: VBOs and VAOs, float/byte/short vertex formats, no primitive restart (logged with `Build-Module.ps1 -Gles`).
+  - **Its rejected `glDrawBuffers` calls are harmless.** WSA rejects them, but a spec-compliant phone driver would too. Accepting them blacks out the scene.
+  - **DirectX sees nothing wrong.** With the D3D11 debug layer forced on for `WsaClient.exe` (Graphics Tools + `dxcpl`), there are no D3D11 errors or warnings at all.
+
+  So the bug is most likely in WSA's GL→D3D11 translation (gfxstream + ANGLE inside `WsaClient.exe`), producing valid but wrong data. Finding it would need a frame capture, e.g. an ARM64 build of RenderDoc.
 - `.apkm` files from APKMirror are encrypted; use APKMirror's installer app for those.
 
 ## Hashes
