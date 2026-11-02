@@ -1,0 +1,3 @@
+# Local copies of game APKs (copyrighted, multi-GB): never commit
+apks/
+*.apk
