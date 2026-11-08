@@ -83,10 +83,16 @@ How it was found: a [`Trace-WsaBoot.ps1`](scripts/Trace-WsaBoot.ps1) trace of th
 **Magisk on WSA:**
 - **The Magisk app is missing from the Start menu** because it comes preinstalled, and WSA only creates entries for apps installed while it runs. Reinstall it over itself once:
   `adb shell 'cp "$(pm path com.topjohnwu.magisk | cut -d: -f2)" /data/local/tmp/m.apk && pm install -r /data/local/tmp/m.apk'`
-- **Don't use the app's Update / Direct install.** The app can't patch `Tools\initrd.img` on the Windows side. A newer Magisk means rebuilding `initrd.img`.
+- **Don't use the app's Update / Direct install.** The app can't patch `Tools\initrd.img` on the Windows side. A newer Magisk means rebuilding `initrd.img`. Updating only the app breaks root prompts. The 30.6 `su` opens a request screen that the 31.x app no longer has, so apps asking for root get no prompt, wait for the timeout, and are refused. AFWall+ then says "Could not acquire root access" and "no iptables support"; already-granted apps and `adb shell su` keep working. To go back, reinstall the app bundled in `initrd.img` (`overlay.d\sbin\stub.xz`, an xz-compressed APK):
+  ```powershell
+  7z e -o"$env:TEMP\initrd" C:\WSA\Tools\initrd.img overlay.d\sbin\stub.xz; 7z e -o"$env:TEMP\initrd" "$env:TEMP\initrd\stub.xz"
+  adb push "$env:TEMP\initrd\stub" /data/local/tmp/magisk.apk
+  adb shell pm install -r -d /data/local/tmp/magisk.apk
+  ```
 - **Zygisk is off by default.** Turn it on in Magisk → Settings → Zygisk and restart WSA if you need it (LSPosed, DenyList, Play Integrity modules). Not tested here yet.
 - The image includes one module, `lsp_cust` ("WSA Customization": VPN dialog, device admin, managed users).
 - `adb root` still doesn't work (the build is `user`); use `adb shell su -c <command>`.
+- **Safe mode: all modules and Zygisk suddenly off, `su: inaccessible or not found`, location popup back.** Magisk counts boots that pass its post-fs-data stage but never reach boot-complete; once two are counted, the next boot is safe mode. It disables every module and Zygisk, doesn't mount `su` into `/system/bin`, and skips `service.d` scripts, so `disable-location.sh` doesn't run either. On WSA this happens when Windows stops the VM during startup. Seen here: three boots in a row stopped about 10 s in, right after Android connected to WSA's `SysPrepChannel`, with or without modules. `/cache/magisk.log` then says `* Safe mode triggered`. Safe mode lasts one boot, but its changes stay. To recover, turn Zygisk back on in Magisk → Settings, re-enable the modules (Magisk → Modules, or `adb shell "/debug_ramdisk/su -c 'rm -f /data/adb/modules/*/disable'"`; `su` still works from `/debug_ramdisk` during safe mode), and restart WSA.
 
 ### Video: YouTube stuck at 0:00
 
@@ -116,7 +122,7 @@ adb push magisk\service.d\disable-location.sh /data/local/tmp/
 adb shell "su -c 'mkdir -p /data/adb/service.d && cp /data/local/tmp/disable-location.sh /data/adb/service.d/ && chmod 755 /data/adb/service.d/disable-location.sh'"
 ```
 
-To undo, delete `/data/adb/service.d/disable-location.sh` as root.
+To undo, delete `/data/adb/service.d/disable-location.sh` as root. If the popup comes back and `adb shell su -c id` fails, Magisk booted in [safe mode](#root) and skipped the script. Switching location off by hand while Android is running makes Play services open a "location is off" warning once; the boot script switches it off early enough that this doesn't happen.
 
 ### Games crashing or rendering wrong: the WSA GL fixes module
 
@@ -136,7 +142,7 @@ adb shell su -c "magisk --install-module /data/local/tmp/wsa-egl-surfaceless.zip
 
 Restart WSA afterwards. `adb shell dumpsys SurfaceFlinger | grep surfaceless` and `adb shell getprop debug.gles.vaoemu` confirm it's active. To remove it, uninstall the module in the Magisk app (or `touch /data/adb/modules/wsa_egl_surfaceless/disable` as root) and restart WSA. If Android ever failed to start with it, booting once with the non-root `initrd.img` skips all Magisk modules.
 
-**Debugging other games:** `Build-Module.ps1 -Diagnostics` adds tools to the GLES wrapper (log tag `gles-seq`). `debug.gles.trace` records the sequence of framebuffer calls with a signature per draw (mode, program, vertex formats, offsets). `debug.gles.skip` drops draws matching signature tokens, to find which ones render wrong. `debug.gles.reupload` re-sends all buffer contents. They're how the VAO bug was narrowed down. Games pause when their window loses focus, so trigger them on a timer while the game is in front. Also note: Magisk disables all modules after boots it counts as failed, so after many quick WSA restarts check Magisk → Modules.
+**Debugging other games:** `Build-Module.ps1 -Diagnostics` adds tools to the GLES wrapper (log tag `gles-seq`). `debug.gles.trace` records the sequence of framebuffer calls with a signature per draw (mode, program, vertex formats, offsets). `debug.gles.skip` drops draws matching signature tokens, to find which ones render wrong. `debug.gles.reupload` re-sends all buffer contents. They're how the VAO bug was narrowed down. Games pause when their window loses focus, so trigger them on a timer while the game is in front. Also note: quick WSA restarts that stop Android mid-boot can put Magisk into [safe mode](#root), which disables all modules.
 
 ---
 
