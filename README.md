@@ -57,6 +57,7 @@ All scripts run in Windows PowerShell 5.1 or PowerShell 7 (`powershell -Executio
 | [`Register-InstallToWSA.ps1`](scripts/Register-InstallToWSA.ps1) | Adds **Install to WSA** to Explorer's right-click menu (per user, no admin). `-Unregister` removes it. |
 | [`Install-ToWSA.ps1`](scripts/Install-ToWSA.ps1) | The installer behind that menu entry: starts WSA if needed, installs APKs and bundles (with OBB data), explains common errors. |
 | [`Trace-WsaBoot.ps1`](scripts/Trace-WsaBoot.ps1) | Records WSA's own diagnostic events, for debugging boots that fail before Android logs anything. Admin only. |
+| [`Watch-WsaLaunch.ps1`](scripts/Watch-WsaLaunch.ps1) | Logs every WSA process start with its command line, parent chain and foreground window, to find what keeps starting WSA. |
 | [`Patch-BullyApk60.ps1`](scripts/Patch-BullyApk60.ps1) | Patches a Bully APK to run at 60 fps without root (one instruction in `libGame.so`), then re-signs it. |
 | [`Set-BullyFps.ps1`](scripts/Set-BullyFps.ps1) | Sets Bully's frame-rate cap (`60`, or `30` for stock) live and persistently, through the GL fixes module. |
 | [`disable-location.sh`](magisk/service.d/disable-location.sh) | Magisk boot script that keeps Android's location off. |
